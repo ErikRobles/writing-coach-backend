@@ -22,13 +22,13 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5000"],
+    allow_origins=["http://localhost:5000", "https://localhost:3000", "*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # MongoDB Setup
-MONGODB_URL = "mongodb://localhost:27017"
+MONGODB_URL = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 motor_client = AsyncIOMotorClient(MONGODB_URL)
 db = motor_client.writing_coach
 
