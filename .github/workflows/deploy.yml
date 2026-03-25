@@ -2,35 +2,30 @@ name: Deploy Backend to Hostinger VPS
 
 on:
   push:
-    branches: [ main ] # This triggers the action every time you push to main
+    branches: [ main ]
+
+env:
+  # This removes the warning and opts into the new Node 24 standard early
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4 # This is already the latest, Node 24 ready
 
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.0.3 # Also Node 24 compatible
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22 # Standard SSH port for Hostinger VPS
+          port: 22
           script: |
-            # 1. Navigate to the project folder
             cd /var/www/WritingCoachBackend || exit
-            
-            # 2. Pull the latest code from GitHub
             git pull origin main
-            
-            # 3. Update the .env file with your Groq Key from GitHub Secrets
             echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" > .env
             echo "PORT=8080" >> .env
-            
-            # 4. Install dependencies into the virtual environment
             ./venv/bin/pip install -r requirements.txt
-            
-            # 5. Restart the systemd service to apply changes
             sudo systemctl restart writingcoach
