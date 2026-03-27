@@ -280,8 +280,8 @@ async def trigger_test_email(current_user: dict = Depends(get_current_user)):
     if not sessions:
         # Create a dummy session for testing if none exist
         sessions = [{
-            "scores": {"spelling": 85, "grammar": 90, "style": 80},
-            "common_mistakes": ["Sample mistake"],
+            "scores": {"spelling": 0, "grammar": 0, "style": 0},
+            "common_mistakes": ["No real practice sessions found yet. Switch to 'Practice Mode' in the chat to start tracking your progress!"],
             "timestamp": datetime.utcnow()
         }]
         
