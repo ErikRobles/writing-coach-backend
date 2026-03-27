@@ -33,6 +33,11 @@ jobs:
             echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" > .env
             echo "MONGO_URI=${{ secrets.MONGO_URI }}" >> .env
             echo "PORT=8080" >> .env
+            echo "SMTP_HOST=${{ secrets.SMTP_HOST }}" >> .env
+            echo "SMTP_PORT=${{ secrets.SMTP_PORT }}" >> .env
+            echo "SMTP_USER=${{ secrets.SMTP_USER }}" >> .env
+            echo "SMTP_PASS=${{ secrets.SMTP_PASS }}" >> .env
+            echo "SMTP_FROM=${{ secrets.SMTP_FROM }}" >> .env
             
             # Ensure dependencies are up to date
             ./venv/bin/pip install -r requirements.txt
