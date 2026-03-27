@@ -26,8 +26,9 @@ jobs:
             # Navigate to the project folder
             cd /var/www/WritingCoachBackend || exit
             
-            # Pull the latest code from GitHub
-            git pull origin main
+            # Force update to match GitHub main branch exactly
+            git fetch --all
+            git reset --hard origin/main
             
             # Recreate the .env file with secrets from GitHub
             echo "GROQ_API_KEY=${{ secrets.GROQ_API_KEY }}" > .env
