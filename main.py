@@ -152,7 +152,7 @@ async def send_report_to_user(user_id: str, email: str, sessions: List[dict]):
             ]
         },
         "options": {
-            "title": {"display": True, "text": "Your Writing Progression", "fontColor": "#ffffff"},
+            "title": {"display": True, "text": "Your Writing Progress", "fontColor": "#ffffff"},
             "legend": {"labels": {"fontColor": "#adaaad"}},
             "scales": {
                 "yAxes": [{"ticks": {"min": 0, "max": 100, "fontColor": "#adaaad"}, "gridLines": {"color": "#2D2D2D"}}],
@@ -177,29 +177,29 @@ async def send_report_to_user(user_id: str, email: str, sessions: List[dict]):
     
     # Generate tips for the top mistakes (simplistic for now)
     report_content = f"""
-    <div style="background-color: #0e0e10; color: #fffbfe; font-family: 'Inter', sans-serif; padding: 40px; border-radius: 20px;">
-        <h1 style="color: #a9ffdf; font-family: 'Space Grotesk', sans-serif; border-bottom: 1px solid #48474a; padding-bottom: 20px;">Your Writing Progress Report</h1>
-        <p style="font-size: 16px; color: #adaaad;">Hello! Here's your performance snapshot:</p>
+    <div style="background-color: #0e0e10; color: #fffbfe; font-family: sans-serif; padding: 40px; border-radius: 20px;">
+        <h1 style="color: #a9ffdf; border-bottom: 1px solid #48474a; padding-bottom: 20px;">Your Weekly Writing Report</h1>
+        <p style="font-size: 16px; color: #adaaad;">Hello! Here is how you did this week:</p>
         
         <div style="background: rgba(169, 255, 223, 0.05); padding: 20px; border-radius: 12px; margin-bottom: 30px; border: 1px solid rgba(169, 255, 223, 0.1);">
             <ul style="list-style: none; padding: 0; margin: 0;">
                 <li style="margin-bottom: 10px;"><strong>Practice Sessions:</strong> {count}</li>
-                <li style="margin-bottom: 10px;"><strong>Avg. Spelling Score:</strong> <span style="color: #00F5FF;">{avg_spelling:.1f}%</span></li>
-                <li><strong>Avg. Grammar Score:</strong> <span style="color: #A9FFDF;">{avg_grammar:.1f}%</span></li>
+                <li style="margin-bottom: 10px;"><strong>Average Spelling Score:</strong> <span style="color: #00F5FF;">{avg_spelling:.1f}%</span></li>
+                <li><strong>Average Grammar Score:</strong> <span style="color: #A9FFDF;">{avg_grammar:.1f}%</span></li>
             </ul>
         </div>
         
-        <h3 style="color: #ac89ff; font-family: 'Space Grotesk', sans-serif;">Linear Improvement Progression:</h3>
+        <h3 style="color: #ac89ff;">Your Progress Chart:</h3>
         <div style="margin: 20px 0; border-radius: 12px; overflow: hidden; border: 1px solid #48474a;">
-            <img src="{chart_url}" alt="Writing Progress Chart" style="width: 100%; max-width: 600px; display: block;" />
+            <img src="{chart_url}" alt="Progress Chart" style="width: 100%; max-width: 600px; display: block;" />
         </div>
         
-        <h3 style="color: #ff51fa; font-family: 'Space Grotesk', sans-serif; margin-top: 40px;">Common Mistakes to Watch:</h3>
+        <h3 style="color: #ff51fa; margin-top: 40px;">Common Mistakes:</h3>
         <ul style="color: #adaaad; font-size: 15px;">
-            {''.join([f"<li style='margin-bottom: 8px;'><strong style='color: #fff;'>{m[0]}</strong> (occurred {m[1]} times)</li>" for m in sorted_mistakes])}
+            {''.join([f"<li style='margin-bottom: 8px;'><strong style='color: #fff;'>{m[0]}</strong> (found {m[1]} times)</li>" for m in sorted_mistakes])}
         </ul>
         
-        <p style="margin-top: 40px; font-size: 14px; font-style: italic; color: #48474a;">Keep practicing to reach your goals! - Your AI Writing Coach</p>
+        <p style="margin-top: 40px; font-size: 14px; font-style: italic; color: #48474a;">Keep practicing to get better! - Your AI Writing Coach</p>
     </div>
     """
     
@@ -207,7 +207,7 @@ async def send_report_to_user(user_id: str, email: str, sessions: List[dict]):
         message = EmailMessage()
         message["From"] = SMTP_FROM
         message["To"] = email
-        message["Subject"] = "Your Writing Coach Progress Report"
+        message["Subject"] = "Your Weekly Writing Report"
         message.set_content(report_content, subtype="html")
         
         # Create a secure SSL context using certifi
@@ -284,16 +284,16 @@ async def trigger_test_email(current_user: dict = Depends(get_current_user)):
         # Create a dummy session for testing if none exist
         sessions = [{
             "scores": {"spelling": 0, "grammar": 0, "style": 0},
-            "common_mistakes": ["No real practice sessions found yet. Switch to 'Practice Mode' in the chat to start tracking your progress!"],
+            "common_mistakes": ["No real practice sessions found yet. Turn on 'Practice Mode' in the chat to start learning!"],
             "timestamp": datetime.utcnow()
         }]
         
     try:
         success = await send_report_to_user(user_id, email, sessions)
         if success:
-            return {"message": f"Test email sent successfully to {email}"}
+            return {"message": f"Test email sent to {email}"}
         else:
-            return {"error": "SMTP credentials not configured"}
+            return {"error": "Email settings not ready"}
     except Exception as e:
         import traceback
         print("EMAIL TEST ERROR:", traceback.format_exc())
@@ -325,7 +325,7 @@ async def startup_db_client():
 async def signup(user_data: UserCreate):
     existing = await db.users.find_one({"email": user_data.email})
     if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=400, detail="Email is already used.")
     
     new_user_id = str(uuid.uuid4())
     hashed_pw = get_password_hash(user_data.password)
@@ -348,7 +348,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     if not user or not verify_password(form_data.password, user["hashed_password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail="Wrong email or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token = create_access_token(data={"sub": user["user_id"]})
@@ -431,15 +431,18 @@ async def get_target_user_details(target_user_id: str, current_user: dict = Depe
 @app.post("/practice")
 async def practice_session(text: str, current_user: dict = Depends(get_current_user)):
     if len(text) > MAX_CHARS:
-        raise HTTPException(status_code=400, detail=f"Text exceeds limit of {MAX_CHARS} characters.")
+        raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
     user_id = current_user["user_id"]
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     client = AsyncGroq(api_key=api_key)
     
     PRACTICE_PROMPT = """
-You are a Writing Coach. Analyze the user's input for Spelling, Grammar, and Style (Formal, Semi-Formal, Informal).
-You MUST respond with a JSON object ONLY. Do not include any other text.
+You are a friendly Writing Coach for students learning English. 
+Analyze the student's writing for Spelling, Grammar, and Style (Formal, Semi-Formal, Informal).
+Use SIMPLE English in your feedback so the student can understand you easily.
+
+You MUST respond with a JSON object ONLY.
 
 The JSON should have this structure:
 {
@@ -449,9 +452,9 @@ The JSON should have this structure:
     "style": <int 0-100>,
     "detected_style": "<formal|semi-formal|informal>"
   },
-  "feedback": "<detailed feedback string>",
+  "feedback": "<simple feedback in easy English>",
   "common_mistakes": ["<mistake 1>", "<mistake 2>"],
-  "tips": ["<tip 1>", "<tip 2>"]
+  "tips": ["<simple tip 1>", "<simple tip 2>"]
 }
 """
 
@@ -511,7 +514,7 @@ async def get_practice_history(current_user: dict = Depends(get_current_user)):
 @app.post("/analyze")
 async def analyze_text(text: str, current_user: dict = Depends(get_current_user)):
     if len(text) > MAX_CHARS:
-        raise HTTPException(status_code=400, detail=f"Text exceeds limit of {MAX_CHARS} characters.")
+        raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
     user_id = current_user["user_id"]
     # Instantiate inside the event loop to fix httpx ConnectionError bugs
@@ -519,17 +522,16 @@ async def analyze_text(text: str, current_user: dict = Depends(get_current_user)
     client = AsyncGroq(api_key=api_key)
     
     SYSTEM_PROMPT = """
-You are a Senior Full-Stack Architect & American English Writing Coach.
-Tone: High-tech, "Cyber-Modern," professional, and friendly.
+You are a friendly Writing Coach for students learning English.
+Use SIMPLE and CLEAR English in your feedback. Avoid hard words.
 
-Focus heavily on American English (US spelling and idioms) and provide feedback on "Register" (Informal vs. Formal).
-Give every correction a "High-Tech" feel—concise, scannable, and actionable.
+Focus on:
+1. Quick Summary (Is the writing good?)
+2. US English fixes (spelling and words)
+3. Tone feedback (Is it informal or formal?)
+4. Simple tips to make the writing better.
 
-Format your response exactly using standard markdown. Use spacing and clear lists.
-1. Summary/Initial take
-2. US English corrections (if any)
-3. Register/Tone feedback (Informal vs Formal analysis)
-4. High-Tech Actionable Advice (precise, specific rewriting suggestions)
+Format your response using simple markdown lists.
 """
 
     async def stream_generator():
