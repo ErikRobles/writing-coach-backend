@@ -26,6 +26,13 @@ app = FastAPI()
 
 # Configuration
 MAX_CHARS = 2000
+TIER_LIMITS = {
+    "free": 50,
+    "basic": 300,
+    "pro": 1000,
+    "premium": 5000,
+    "corporate": 999999
+}
 
 # SMTP Configuration
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -69,6 +76,7 @@ def create_access_token(data: dict):
 class UserCreate(BaseModel):
     email: str
     password: str
+    tier: str = "free" # Default tier
 
 class Token(BaseModel):
     access_token: str
@@ -88,6 +96,10 @@ class UserStats(BaseModel):
     average_grammar: float = 0.0
     average_style: float = 0.0
     last_active: Optional[datetime] = None
+    # Tiered Pricing
+    current_tier: str = "free"
+    monthly_tokens_used: int = 0
+    last_token_reset: datetime = Field(default_factory=datetime.utcnow)
 
 class User(BaseModel):
     user_id: str
@@ -109,6 +121,31 @@ class PracticeSession(BaseModel):
 
 import ssl
 import certifi
+
+# Logic Helpers
+async def check_and_update_tokens(user: dict):
+    stats = user.get("stats", {})
+    tier = stats.get("current_tier", "free")
+    used = stats.get("monthly_tokens_used", 0)
+    limit = TIER_LIMITS.get(tier, 50)
+    
+    # Check for monthly reset
+    last_reset = stats.get("last_token_reset", datetime.utcnow())
+    if isinstance(last_reset, str):
+        last_reset = datetime.fromisoformat(last_reset)
+        
+    now = datetime.utcnow()
+    if now.month != last_reset.month or now.year != last_reset.year:
+        used = 0
+        await db.users.update_one(
+            {"user_id": user["user_id"]},
+            {"$set": {"stats.monthly_tokens_used": 0, "stats.last_token_reset": now}}
+        )
+
+    if used >= limit:
+        return False, f"You have reached your limit of {limit} tokens for the {tier} plan. Please upgrade to continue."
+    
+    return True, ""
 
 # Email and Scheduler Logic
 async def send_report_to_user(user_id: str, email: str, sessions: List[dict]):
@@ -311,7 +348,8 @@ async def startup_db_client():
     admin_id = "erikjames69@hotmail.com"
     if not await db.users.find_one({"email": admin_id}):
         await db.users.insert_one(User(
-            user_id=str(uuid.uuid4()), email=admin_id, hashed_password=pw, role="admin"
+            user_id=str(uuid.uuid4()), email=admin_id, hashed_password=pw, role="admin",
+            stats=UserStats(current_tier="premium")
         ).model_dump())
         
     # Pre-seed User
@@ -333,7 +371,8 @@ async def signup(user_data: UserCreate):
         user_id=new_user_id,
         email=user_data.email,
         hashed_password=hashed_pw,
-        role="admin" if user_data.email.lower() == "erikjames69@hotmail.com" else "user"
+        role="admin" if user_data.email.lower() == "erikjames69@hotmail.com" else "user",
+        stats=UserStats(current_tier=user_data.tier)
     )
     # Pydantic v2 dump
     await db.users.insert_one(new_user.model_dump())
@@ -360,6 +399,17 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
     if user:
         return user
     return {"error": "User not found"}
+
+@app.post("/user/me/upgrade")
+async def upgrade_tier(tier: str, current_user: dict = Depends(get_current_user)):
+    if tier not in TIER_LIMITS:
+        raise HTTPException(status_code=400, detail="Invalid tier selection.")
+    
+    await db.users.update_one(
+        {"user_id": current_user["user_id"]},
+        {"$set": {"stats.current_tier": tier}}
+    )
+    return {"message": f"Successfully upgraded to {tier} tier."}
 
 @app.get("/user/me/history")
 async def get_user_history(current_user: dict = Depends(get_current_user)):
@@ -433,6 +483,11 @@ async def practice_session(text: str, current_user: dict = Depends(get_current_u
     if len(text) > MAX_CHARS:
         raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
+    # Token Check
+    allowed, error_msg = await check_and_update_tokens(current_user)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=error_msg)
+
     user_id = current_user["user_id"]
     
     # --- Response Cache Lookup ---
@@ -502,13 +557,14 @@ The JSON should have this structure:
     
     await db.practice_history.insert_one(session.model_dump())
     
-    # Update user stats
+    # Update user stats & Increment Token Usage
     await db.users.update_one(
         {"user_id": user_id},
         {
             "$inc": {
                 "stats.total_practice_sessions": 1,
-                "stats.total_analyzed": 1
+                "stats.total_analyzed": 1,
+                "stats.monthly_tokens_used": 1
             },
             "$set": {
                 "stats.last_active": datetime.utcnow()
@@ -531,6 +587,11 @@ async def analyze_text(text: str, current_user: dict = Depends(get_current_user)
     if len(text) > MAX_CHARS:
         raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
+    # Token Check
+    allowed, error_msg = await check_and_update_tokens(current_user)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=error_msg)
+
     user_id = current_user["user_id"]
 
     # --- Response Cache Lookup ---
@@ -598,10 +659,15 @@ Format your response using simple markdown lists.
                 "timestamp": datetime.utcnow()
             })
             
-            # Increment user stats
+            # Increment user stats & Increment Token Usage
             await db.users.update_one(
                 {"user_id": user_id}, 
-                {"$inc": {"stats.total_analyzed": 1}}
+                {
+                    "$inc": {
+                        "stats.total_analyzed": 1,
+                        "stats.monthly_tokens_used": 1
+                    }
+                }
             )
 
         except Exception as e:
