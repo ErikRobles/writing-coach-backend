@@ -434,10 +434,17 @@ async def practice_session(text: str, current_user: dict = Depends(get_current_u
         raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
     user_id = current_user["user_id"]
-    api_key = os.environ.get("GROQ_API_KEY", "").strip()
-    client = AsyncGroq(api_key=api_key)
     
-    PRACTICE_PROMPT = """
+    # --- Response Cache Lookup ---
+    cached_response = await db.response_cache.find_one({"text": text, "type": "practice"})
+    if cached_response:
+        print(f"CACHE HIT [PRACTICE]: Serving pre-saved result.")
+        result_json = cached_response["data"]
+    else:
+        api_key = os.environ.get("GROQ_API_KEY", "").strip()
+        client = AsyncGroq(api_key=api_key)
+        
+        PRACTICE_PROMPT = """
 You are a friendly Writing Coach for students learning English. 
 Analyze the student's writing for Spelling, Grammar, and Style (Formal, Semi-Formal, Informal).
 Use SIMPLE English in your feedback so the student can understand you easily.
@@ -458,50 +465,58 @@ The JSON should have this structure:
 }
 """
 
-    try:
-        completion = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": PRACTICE_PROMPT.strip()},
-                {"role": "user", "content": text}
-            ],
-            response_format={"type": "json_object"}
-        )
+        try:
+            completion = await client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": PRACTICE_PROMPT.strip()},
+                    {"role": "user", "content": text}
+                ],
+                response_format={"type": "json_object"}
+            )
 
-        result_json = json.loads(completion.choices[0].message.content)
-        
-        # Save practice session
-        session = PracticeSession(
-            user_id=user_id,
-            text=text,
-            scores=ScoreBreakdown(**result_json["scores"]),
-            feedback=result_json["feedback"],
-            common_mistakes=result_json.get("common_mistakes", []),
-            tips=result_json.get("tips", [])
-        )
-        
-        await db.practice_history.insert_one(session.model_dump())
-        
-        # Update user stats
-        await db.users.update_one(
-            {"user_id": user_id},
-            {
-                "$inc": {
-                    "stats.total_practice_sessions": 1,
-                    "stats.total_analyzed": 1
-                },
-                "$set": {
-                    "stats.last_active": datetime.utcnow()
-                }
+            result_json = json.loads(completion.choices[0].message.content)
+            
+            # Save to Cache
+            await db.response_cache.insert_one({
+                "text": text,
+                "type": "practice",
+                "data": result_json,
+                "timestamp": datetime.utcnow()
+            })
+
+        except Exception as e:
+            import traceback
+            print("PRACTICE ERROR:", traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Save to user history
+    session = PracticeSession(
+        user_id=user_id,
+        text=text,
+        scores=ScoreBreakdown(**result_json["scores"]),
+        feedback=result_json["feedback"],
+        common_mistakes=result_json.get("common_mistakes", []),
+        tips=result_json.get("tips", [])
+    )
+    
+    await db.practice_history.insert_one(session.model_dump())
+    
+    # Update user stats
+    await db.users.update_one(
+        {"user_id": user_id},
+        {
+            "$inc": {
+                "stats.total_practice_sessions": 1,
+                "stats.total_analyzed": 1
+            },
+            "$set": {
+                "stats.last_active": datetime.utcnow()
             }
-        )
-        
-        return result_json
-
-    except Exception as e:
-        import traceback
-        print("PRACTICE ERROR:", traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+        }
+    )
+    
+    return result_json
 
 @app.get("/user/me/practice-history")
 async def get_practice_history(current_user: dict = Depends(get_current_user)):
@@ -517,11 +532,27 @@ async def analyze_text(text: str, current_user: dict = Depends(get_current_user)
         raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
     user_id = current_user["user_id"]
-    # Instantiate inside the event loop to fix httpx ConnectionError bugs
-    api_key = os.environ.get("GROQ_API_KEY", "").strip()
-    client = AsyncGroq(api_key=api_key)
+
+    # --- Response Cache Lookup ---
+    cached_response = await db.response_cache.find_one({"text": text, "type": "analysis"})
     
-    SYSTEM_PROMPT = """
+    async def stream_generator():
+        full_suggestion = ""
+        try:
+            if cached_response:
+                print(f"CACHE HIT [ANALYSIS]: Simulating stream from cache.")
+                full_suggestion = cached_response["full_text"]
+                # Split by space to simulate typing feel
+                words = full_suggestion.split(' ')
+                for word in words:
+                    chunk = word + ' '
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': chunk}}]})}\n\n"
+                    await asyncio.sleep(0.01) # Small delay for realistic feel
+            else:
+                api_key = os.environ.get("GROQ_API_KEY", "").strip()
+                client = AsyncGroq(api_key=api_key)
+                
+                SYSTEM_PROMPT = """
 You are a friendly Writing Coach for students learning English.
 Use SIMPLE and CLEAR English in your feedback. Avoid hard words.
 
@@ -533,29 +564,32 @@ Focus on:
 
 Format your response using simple markdown lists.
 """
+                completion = await client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT.strip()},
+                        {"role": "user", "content": text}
+                    ],
+                    stream=True
+                )
 
-    async def stream_generator():
-        full_suggestion = ""
-        try:
-            completion = await client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT.strip()},
-                    {"role": "user", "content": text}
-                ],
-                stream=True
-            )
-
-            async for chunk in completion:
-                content = chunk.choices[0].delta.content
-                if content:
-                    full_suggestion += content
-                    # We must format as SSE for the frontend fetch reader
-                    yield f"data: {json.dumps({'choices': [{'delta': {'content': content}}]})}\n\n"
+                async for chunk in completion:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        full_suggestion += content
+                        yield f"data: {json.dumps({'choices': [{'delta': {'content': content}}]})}\n\n"
+                
+                # Save to Cache after stream completes
+                await db.response_cache.insert_one({
+                    "text": text,
+                    "type": "analysis",
+                    "full_text": full_suggestion,
+                    "timestamp": datetime.utcnow()
+                })
             
             yield "data: [DONE]\n\n"
             
-            # Save to MongoDB asynchronously after streaming completes
+            # Save to user history
             await db.history.insert_one({
                 "session_id": str(uuid.uuid4()),
                 "user_id": user_id,
