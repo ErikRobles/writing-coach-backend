@@ -24,6 +24,9 @@ from typing import Optional, List, Dict
 
 app = FastAPI()
 
+# Configuration
+MAX_CHARS = 2000
+
 # SMTP Configuration
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -39,7 +42,7 @@ app.add_middleware(
 )
 
 # MongoDB Setup
-MONGODB_URL = os.environ.get("MONGO_URI", "mongodb://127.0.0.1:27017/writing_coach")
+MONGODB_URL = os.environ.get("MONGO_URI", "mongodb://192.168.100.22:27017/writing_coach")
 motor_client = AsyncIOMotorClient(MONGODB_URL)
 db = motor_client.writing_coach
 
@@ -360,11 +363,29 @@ async def get_user_stats(current_user: dict = Depends(get_current_user)):
 
 @app.get("/user/me/history")
 async def get_user_history(current_user: dict = Depends(get_current_user)):
-    cursor = db.history.find({"user_id": current_user["user_id"]}).sort("timestamp", -1).limit(50)
-    history = await cursor.to_list(length=50)
-    for h in history:
+    user_id = current_user["user_id"]
+    
+    # Fetch regular analysis history
+    cursor_analysis = db.history.find({"user_id": user_id}).sort("timestamp", -1).limit(25)
+    analysis_history = await cursor_analysis.to_list(length=25)
+    for h in analysis_history:
         h["_id"] = str(h["_id"])
-    return history
+        h["type"] = "analysis"
+        h["text_preview"] = h.get("user_draft", "")
+
+    # Fetch practice session history
+    cursor_practice = db.practice_history.find({"user_id": user_id}).sort("timestamp", -1).limit(25)
+    practice_history = await cursor_practice.to_list(length=25)
+    for p in practice_history:
+        p["_id"] = str(p["_id"])
+        p["type"] = "practice"
+        p["text_preview"] = p.get("text", "")
+
+    # Combine and sort by timestamp descending
+    combined = analysis_history + practice_history
+    combined.sort(key=lambda x: x["timestamp"], reverse=True)
+    
+    return combined[:50]
 
 @app.get("/admin/users")
 async def get_admin_users(current_user: dict = Depends(get_current_user)):
@@ -373,8 +394,45 @@ async def get_admin_users(current_user: dict = Depends(get_current_user)):
     cursor = db.users.find({}, {"_id": 0, "hashed_password": 0}).limit(100)
     return await cursor.to_list(length=100)
 
+@app.get("/admin/user/{target_user_id}/details")
+async def get_target_user_details(target_user_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    user = await db.users.find_one({"user_id": target_user_id}, {"_id": 0, "hashed_password": 0})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    # Fetch regular analysis history
+    cursor_analysis = db.history.find({"user_id": target_user_id}).sort("timestamp", -1).limit(25)
+    analysis_history = await cursor_analysis.to_list(length=25)
+    for h in analysis_history:
+        h["_id"] = str(h["_id"])
+        h["type"] = "analysis"
+        h["text_preview"] = h.get("user_draft", "")
+
+    # Fetch practice session history
+    cursor_practice = db.practice_history.find({"user_id": target_user_id}).sort("timestamp", -1).limit(25)
+    practice_history = await cursor_practice.to_list(length=25)
+    for p in practice_history:
+        p["_id"] = str(p["_id"])
+        p["type"] = "practice"
+        p["text_preview"] = p.get("text", "")
+
+    # Combine and sort
+    combined = analysis_history + practice_history
+    combined.sort(key=lambda x: x["timestamp"], reverse=True)
+    
+    return {
+        "user": user,
+        "history": combined[:50]
+    }
+
 @app.post("/practice")
 async def practice_session(text: str, current_user: dict = Depends(get_current_user)):
+    if len(text) > MAX_CHARS:
+        raise HTTPException(status_code=400, detail=f"Text exceeds limit of {MAX_CHARS} characters.")
+        
     user_id = current_user["user_id"]
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
     client = AsyncGroq(api_key=api_key)
@@ -452,6 +510,9 @@ async def get_practice_history(current_user: dict = Depends(get_current_user)):
 
 @app.post("/analyze")
 async def analyze_text(text: str, current_user: dict = Depends(get_current_user)):
+    if len(text) > MAX_CHARS:
+        raise HTTPException(status_code=400, detail=f"Text exceeds limit of {MAX_CHARS} characters.")
+        
     user_id = current_user["user_id"]
     # Instantiate inside the event loop to fix httpx ConnectionError bugs
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
