@@ -9,8 +9,9 @@ Use these accounts to test different pricing tiers and roles:
 
 | Tier | Email | Password | Role |
 |------|-------|----------|------|
-| **Free** | `free@test.com` | `password123` | `free` |
-| **Basic** | `basic@test.com` | `password123` | `basic` |
-| **Pro** | `pro@test.com` | `password123` | `pro` |
-| **Premium** | `premium@test.com` | `password123` | `premium` |
-| **Admin** | `admin@test.com` | `password123` | `admin` |
+| **Free** | `free@test.com` | `password123` | "Your Password" | `free` |
+| **Basic** | `basic@test.com` | "Your Password" | `basic` |
+| **Pro** | `pro@test.com` | `password123` | `password123` | "Your Password" | `pro` |
+| **Premium** | `premium@test.com` | `password123` | "Your Password" | `premium` |
+| **Admin** | `admin@test.com` | "Your Password" | `admin` |
+

@@ -22,16 +22,20 @@ async def seed_users():
         {"email": "admin@test.com", "tier": "corporate", "role": "admin"}
     ]
     
-    password = "password123"
+    password = "Star0101*1"
     hashed_pw = get_password_hash(password)
     
     for u in users_to_create:
         existing = await db.users.find_one({"email": u["email"]})
         if existing:
-            print(f"User {u['email']} already exists. Updating role and tier.")
+            print(f"User {u['email']} already exists. Updating role, tier, and password.")
             await db.users.update_one(
                 {"email": u["email"]},
-                {"$set": {"role": u["role"], "stats.current_tier": u["tier"]}}
+                {"$set": {
+                    "role": u["role"], 
+                    "stats.current_tier": u["tier"],
+                    "hashed_password": hashed_pw
+                }}
             )
         else:
             print(f"Creating user {u['email']}")
