@@ -1,8 +1,17 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from groq import AsyncGroq
+import mercadopago
+from paypalserversdk.paypal_serversdk_client import PaypalServersdkClient
+from paypalserversdk.configuration import Environment
+from paypalserversdk.http.auth.o_auth_2 import ClientCredentialsAuthCredentials
+from paypalserversdk.models.order_request import OrderRequest
+from paypalserversdk.models.purchase_unit_request import PurchaseUnitRequest
+from paypalserversdk.models.amount_with_breakdown import AmountWithBreakdown
+from paypalserversdk.models.order_authorize_request import OrderAuthorizeRequest
+from paypalserversdk.models.order_capture_request import OrderCaptureRequest
 import bcrypt
 import jwt
 from datetime import datetime, timedelta, time
@@ -15,6 +24,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import aiosmtplib
 from email.message import EmailMessage
+import ssl
+import certifi
 
 load_dotenv()
 
@@ -33,6 +44,31 @@ TIER_LIMITS = {
     "premium": 5000,
     "corporate": 999999
 }
+TIER_PRICES = {
+    "free": 0.0,
+    "basic": 5.0,
+    "pro": 12.0,
+    "premium": 30.0
+}
+
+# PayPal Setup
+PAYPAL_CLIENT_ID = os.environ.get("PAYPAL_CLIENT_ID", "")
+PAYPAL_CLIENT_SECRET = os.environ.get("PAYPAL_CLIENT_SECRET", "")
+# In prod, use Environment.PRODUCTION
+paypal_env = Environment.SANDBOX
+
+paypal_client = PaypalServersdkClient(
+    client_credentials_auth_credentials=ClientCredentialsAuthCredentials(
+        o_auth_client_id=PAYPAL_CLIENT_ID,
+        o_auth_client_secret=PAYPAL_CLIENT_SECRET
+    ),
+    environment=paypal_env,
+    logging_configuration=None
+)
+
+# Mercado Pago Setup
+MERCADOPAGO_ACCESS_TOKEN = os.environ.get("MERCADOPAGO_ACCESS_TOKEN", "")
+mp_sdk = mercadopago.SDK(MERCADOPAGO_ACCESS_TOKEN)
 
 # SMTP Configuration
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
@@ -49,8 +85,8 @@ app.add_middleware(
 )
 
 # MongoDB Setup
-MONGODB_URL = os.environ.get("MONGO_URI", "mongodb://192.168.100.22:27017/writing_coach")
-motor_client = AsyncIOMotorClient(MONGODB_URL)
+MONGODB_URL = os.environ.get("MONGO_URI", "mongodb+srv://ErikRobles:Star0101*1@cluster0.pa3mj3x.mongodb.net/writing_coach?retryWrites=true&w=majority&appName=Cluster0")
+motor_client = AsyncIOMotorClient(MONGODB_URL, tlsCAFile=certifi.where())
 db = motor_client.writing_coach
 
 # Auth Setup
@@ -81,6 +117,7 @@ class UserCreate(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    role: str
 
 class ScoreBreakdown(BaseModel):
     spelling: int = 0
@@ -119,23 +156,43 @@ class PracticeSession(BaseModel):
     tips: List[str] = []
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
-import ssl
-import certifi
-
 # Logic Helpers
+def check_prompt_injection(text: str) -> bool:
+    """
+    Basic protection against prompt injection attacks.
+    Checks for common keywords and patterns used to override system prompts.
+    """
+    injection_keywords = [
+        "ignore previous", "ignore above", "ignore all", "new instructions",
+        "system prompt", "you are now", "instead of", "forget everything",
+        "override", "disregard", "stop being", "start being", "bypass",
+        "jailbreak", "DAN mode"
+    ]
+    
+    lowered_text = text.lower()
+    for keyword in injection_keywords:
+        if keyword in lowered_text:
+            return True
+            
+    # Check for excessive delimiters that might be used to segment the prompt
+    if text.count("---") > 4 or text.count("===") > 4:
+        return True
+        
+    return False
+
 async def check_and_update_tokens(user: dict):
     stats = user.get("stats", {})
     tier = stats.get("current_tier", "free")
     used = stats.get("monthly_tokens_used", 0)
     limit = TIER_LIMITS.get(tier, 50)
     
-    # Check for monthly reset
+    # Check for monthly reset (Only for paid tiers)
     last_reset = stats.get("last_token_reset", datetime.utcnow())
     if isinstance(last_reset, str):
         last_reset = datetime.fromisoformat(last_reset)
         
     now = datetime.utcnow()
-    if now.month != last_reset.month or now.year != last_reset.year:
+    if tier != "free" and (now.month != last_reset.month or now.year != last_reset.year):
         used = 0
         await db.users.update_one(
             {"user_id": user["user_id"]},
@@ -356,7 +413,8 @@ async def startup_db_client():
     user_id = "gi_ambriz@msn.com"
     if not await db.users.find_one({"email": user_id}):
         await db.users.insert_one(User(
-            user_id=str(uuid.uuid4()), email=user_id, hashed_password=pw, role="user"
+            user_id=str(uuid.uuid4()), email=user_id, hashed_password=pw, role="free",
+            stats=UserStats(current_tier="free")
         ).model_dump())
 
 @app.post("/signup", response_model=Token)
@@ -367,18 +425,27 @@ async def signup(user_data: UserCreate):
     
     new_user_id = str(uuid.uuid4())
     hashed_pw = get_password_hash(user_data.password)
+    
+    # Assign role based on tier or admin email
+    role = "user"
+    if user_data.email.lower() == "erikjames69@hotmail.com":
+        role = "admin"
+    else:
+        # If user wants role to be the plan name
+        role = user_data.tier
+
     new_user = User(
         user_id=new_user_id,
         email=user_data.email,
         hashed_password=hashed_pw,
-        role="admin" if user_data.email.lower() == "erikjames69@hotmail.com" else "user",
+        role=role,
         stats=UserStats(current_tier=user_data.tier)
     )
     # Pydantic v2 dump
     await db.users.insert_one(new_user.model_dump())
     
     access_token = create_access_token(data={"sub": new_user_id})
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer", "role": role}
 
 @app.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -391,7 +458,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token = create_access_token(data={"sub": user["user_id"]})
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer", "role": user.get("role", "user")}
 
 @app.get("/user/me/stats")
 async def get_user_stats(current_user: dict = Depends(get_current_user)):
@@ -405,11 +472,147 @@ async def upgrade_tier(tier: str, current_user: dict = Depends(get_current_user)
     if tier not in TIER_LIMITS:
         raise HTTPException(status_code=400, detail="Invalid tier selection.")
     
+    # Update both tier and role (unless admin)
+    update_data = {"stats.current_tier": tier}
+    if current_user.get("role") != "admin":
+        update_data["role"] = tier
+
     await db.users.update_one(
         {"user_id": current_user["user_id"]},
-        {"$set": {"stats.current_tier": tier}}
+        {"$set": update_data}
     )
     return {"message": f"Successfully upgraded to {tier} tier."}
+
+# --- Payment Gateway Endpoints ---
+
+@app.post("/payments/paypal/create-order")
+async def paypal_create_order(tier: str, current_user: dict = Depends(get_current_user)):
+    if tier not in TIER_PRICES:
+        raise HTTPException(status_code=400, detail="Invalid tier selection.")
+    
+    amount = TIER_PRICES[tier]
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Cannot create order for free tier.")
+
+    # Convert to string with 2 decimal places
+    amount_str = "{:.2f}".format(amount)
+
+    body = {
+        "intent": "CAPTURE",
+        "purchase_units": [
+            {
+                "amount": {
+                    "currency_code": "MXN", # User mentioned Mexico market
+                    "value": amount_str
+                },
+                "description": f"WritingCoach {tier.capitalize()} Plan"
+            }
+        ]
+    }
+
+    try:
+        # Using dict for body as APIMATIC usually handles it, or we could use OrderRequest model
+        options = {
+            'body': body
+        }
+        response = await asyncio.to_thread(paypal_client.orders.create_order, options)
+        
+        if response.status_code >= 200 and response.status_code < 300:
+            return {"orderID": response.body["id"]}
+        else:
+            raise HTTPException(status_code=response.status_code, detail="PayPal order creation failed.")
+    except Exception as e:
+        print(f"PayPal Order Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/payments/paypal/capture-order")
+async def paypal_capture_order(orderID: str, tier: str, current_user: dict = Depends(get_current_user)):
+    try:
+        options = {
+            'id': orderID
+        }
+        response = await asyncio.to_thread(paypal_client.orders.capture_order, options)
+        
+        if response.status_code >= 200 and response.status_code < 300:
+            if response.body["status"] == "COMPLETED":
+                # Upgrade user
+                await upgrade_tier(tier, current_user)
+                return {"status": "COMPLETED"}
+            else:
+                return {"status": response.body["status"]}
+        else:
+            raise HTTPException(status_code=response.status_code, detail="PayPal order capture failed.")
+    except Exception as e:
+        print(f"PayPal Capture Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/payments/mercadopago/create-preference")
+async def mp_create_preference(tier: str, current_user: dict = Depends(get_current_user)):
+    if tier not in TIER_PRICES:
+        raise HTTPException(status_code=400, detail="Invalid tier selection.")
+    
+    amount = TIER_PRICES[tier]
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Cannot create preference for free tier.")
+
+    preference_data = {
+        "items": [
+            {
+                "title": f"WritingCoach {tier.capitalize()} Plan",
+                "quantity": 1,
+                "unit_price": float(amount),
+                "currency_id": "MXN"
+            }
+        ],
+        "back_urls": {
+            "success": f"http://localhost:5173/payment-success?tier={tier}",
+            "failure": "http://localhost:5173/payment-failure",
+            "pending": "http://localhost:5173/payment-pending"
+        },
+        "auto_return": "approved",
+        "external_reference": str(current_user["user_id"])
+    }
+
+    try:
+        preference_response = await asyncio.to_thread(mp_sdk.preference().create, preference_data)
+        preference = preference_response["response"]
+        return {"id": preference["id"], "init_point": preference["init_point"]}
+    except Exception as e:
+        print(f"Mercado Pago Preference Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/payments/webhook/mercadopago")
+async def mp_webhook(request: Request):
+    """
+    Mercado Pago IPN / Webhook handler.
+    """
+    params = request.query_params
+    topic = params.get("topic") or params.get("type")
+    resource_id = params.get("id") or params.get("data.id")
+
+    if topic == "payment":
+        payment_info = await asyncio.to_thread(mp_sdk.payment().get, resource_id)
+        payment_data = payment_info["response"]
+        
+        status = payment_data.get("status")
+        external_reference = payment_data.get("external_reference")
+        
+        if status == "approved" and external_reference:
+            # Find user and upgrade
+            user = await db.users.find_one({"user_id": external_reference})
+            if user:
+                # We need to know which tier they paid for. 
+                # Ideally, this should be in the external_reference or item title.
+                # For now, we'll try to find it from the item title or just use a default or store pending upgrades in DB.
+                items = payment_data.get("additional_info", {}).get("items", [])
+                if items:
+                    title = items[0].get("title", "").lower()
+                    for t in TIER_PRICES:
+                        if t in title:
+                            await upgrade_tier(t, user)
+                            break
+
+    return {"status": "success"}
 
 @app.get("/user/me/history")
 async def get_user_history(current_user: dict = Depends(get_current_user)):
@@ -483,6 +686,9 @@ async def practice_session(text: str, current_user: dict = Depends(get_current_u
     if len(text) > MAX_CHARS:
         raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
+    if check_prompt_injection(text):
+        raise HTTPException(status_code=403, detail="Security error: Potential prompt injection detected. Please use normal English for writing practice.")
+
     # Token Check
     allowed, error_msg = await check_and_update_tokens(current_user)
     if not allowed:
@@ -587,6 +793,9 @@ async def analyze_text(text: str, current_user: dict = Depends(get_current_user)
     if len(text) > MAX_CHARS:
         raise HTTPException(status_code=400, detail=f"Text is too long. Please use less than {MAX_CHARS} characters.")
         
+    if check_prompt_injection(text):
+        raise HTTPException(status_code=403, detail="Security error: Potential prompt injection detected. Please use normal English for analysis.")
+
     # Token Check
     allowed, error_msg = await check_and_update_tokens(current_user)
     if not allowed:
